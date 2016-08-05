@@ -1,14 +1,197 @@
 package main
 
 import (
-	"encoding/binary"
-	"fmt"
-	"os"
+	"errors"
+	"github.com/mssola/user_agent"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
+type ReplaceBody struct {
+	Body         io.ReadCloser
+	Position     int64
+	RewriteBytes *RewriteBytes
+}
+
+type RewriteBytes struct {
+	StartPosition int64
+	EndPosition   int64
+	Elements      []RewriteByte
+}
+
+type RewriteByte struct {
+	Position int64
+	Byte     byte
+}
+
+func (rb *ReplaceBody) Read(p []byte) (n int, err error) {
+	n, err = rb.Body.Read(p)
+	start := rb.Position
+	stop := rb.Position + int64(n)
+	if rb.hit(n) {
+		for _, e := range rb.RewriteBytes.Elements {
+			if e.Position >= start && e.Position <= stop {
+				offset := e.Position - rb.Position
+				copy(p[offset:offset+1], []byte{e.Byte})
+			}
+		}
+
+	}
+	rb.Position += int64(n)
+	return n, err
+}
+
+func (rb *ReplaceBody) Close() error {
+	return rb.Body.Close()
+}
+
+func (rb *ReplaceBody) hit(bufferLength int) bool {
+	bl := int64(bufferLength)
+	return (rb.Position <= rb.RewriteBytes.StartPosition && rb.Position+bl >= rb.RewriteBytes.StartPosition) ||
+		(rb.Position <= rb.RewriteBytes.EndPosition && rb.Position+bl >= rb.RewriteBytes.EndPosition)
+}
+
+type ReplaceTransport struct {
+	DimensionsCache *DimensionsCache
+}
+
+func (t *ReplaceTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	d, err := t.DimensionsCache.Get(req.URL)
+	if err != nil {
+		return nil, err
+	}
+
+	res, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rb := &RewriteBytes{
+		StartPosition: d.WidthPosition,
+		EndPosition:   d.HeightPosition + int64(len(d.Height)),
+		Elements:      make([]RewriteByte, len(d.Width)+len(d.Height)),
+	}
+
+	for i := range d.Width {
+		rb.Elements[i] = RewriteByte{Position: d.WidthPosition + int64(i), Byte: d.Height[i]}
+	}
+
+	for i := range d.Height {
+		rb.Elements[i + len(d.Width)] = RewriteByte{Position: d.HeightPosition + int64(i), Byte: d.Width[i]}
+	}
+
+	outres := new(http.Response)
+	*outres = *res // includes shallow copies of maps, but okay
+	outres.Body = &ReplaceBody{
+		Position:     t.getRangeStart(req),
+		Body:         res.Body,
+		RewriteBytes: rb,
+	}
+	return outres, nil
+}
+
+func (t *ReplaceTransport) getRangeStart(req *http.Request) int64 {
+	requestRange := req.Header.Get("Range")
+	if requestRange == "" {
+		return 0
+	}
+
+	re := regexp.MustCompile(`bytes=([0-9]+)-`)
+	r := re.FindStringSubmatch(requestRange)
+	if r == nil {
+		panic("Cannot parse range start")
+	}
+
+	result, err := strconv.ParseInt(r[1], 10, 64)
+	if err != nil {
+		panic("Cannot parse range start")
+	}
+
+	return result
+}
+
+type HttpHandler struct {
+	DimensionsCache *DimensionsCache
+	Proxy           *httputil.ReverseProxy
+}
+
+func NewHttpHandler(dc *DimensionsCache) *HttpHandler {
+
+	httpHandler := new(HttpHandler)
+	httpHandler.DimensionsCache = dc
+	httpHandler.Proxy = &httputil.ReverseProxy{
+		Director: func(request *http.Request) {
+			url, err := httpHandler.getFileUrl(request)
+			check(err)
+
+			request.Host = url.Host
+			request.URL = url
+		},
+		Transport: &ReplaceTransport{
+			DimensionsCache: dc,
+		},
+	}
+	return httpHandler
+}
+
+func (h *HttpHandler) getFileUrl(r *http.Request) (*url.URL, error) {
+	queryString := r.URL.Query().Get("url")
+	if queryString == "" {
+		return nil, errors.New("Empty URL")
+	}
+	url, err := url.Parse(queryString)
+	return url, err
+
+}
+
+func (h *HttpHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+	url, err := h.getFileUrl(r)
+	if err != nil {
+		rw.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	redirect := func() {
+		http.Redirect(rw, r, url.String(), http.StatusTemporaryRedirect)
+	}
+
+	ua := user_agent.New(r.UserAgent())
+	name, version := ua.Browser()
+	if name != "Chrome" || strings.Index(version, "52.") != 0 {
+		redirect()
+		return
+	}
+
+	d, err := h.DimensionsCache.Get(url)
+	if err != nil {
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if d.SwapHeightAndWidth == 0 {
+		redirect()
+		return
+	}
+
+	h.Proxy.ServeHTTP(rw, r)
+}
+
 func main() {
-	execute("chunk.mp4")
+	dc := NewDimensionsCache()
+	dc.Start("http://localhost:5001")
+
+	s := &http.Server{
+		Addr:           ":5000",
+		Handler:        NewHttpHandler(dc),
+		MaxHeaderBytes: 1 << 20,
+	}
+	log.Fatal(s.ListenAndServe())
 }
 
 func check(e error) {
@@ -16,79 +199,3 @@ func check(e error) {
 		panic(e)
 	}
 }
-
-func copyBytes(sourceFile *os.File, destinationFile *os.File, position int64, sizeOfAtom int64) {
-	bufferLength := sizeOfAtom
-	buffer := make([]byte, bufferLength)
-	sourceFile.ReadAt(buffer, position)
-	destinationFile.Write(buffer)
-}
-
-func execute(path string) {
-	stat, err := os.Stat(path)
-	check(err)
-	fileSize := stat.Size()
-
-	sourceFile, err := os.Open(path)
-	check(err)
-
-	destinationFile, err := os.Create("fixed.mp4")
-	check(err)
-
-	parseAtoms(0, fileSize, 0, sourceFile, destinationFile)
-
-	destinationFile.Close()
-}
-
-var atoms = map[string]bool{"moov": true, "trak": true}
-
-func parseAtoms(position int64, size int64, level int, sourceFile *os.File, destinationFile *os.File) {
-	startPosition := position
-	for position < startPosition+size {
-		position = parseAtom(position, level, sourceFile, destinationFile)
-	}
-}
-
-func parseAtom(position int64, level int, sourceFile *os.File, destinationFile *os.File) (int64) {
-	buffer := make([]byte, 4)
-	sourceFile.ReadAt(buffer, position)
-
-	atomSize := int64(binary.BigEndian.Uint32(buffer))
-
-	sourceFile.ReadAt(buffer, position+4)
-	typeOfAtom := string(buffer)
-
-	fmt.Printf("%sAtom %s @ %d size %d\n", strings.Repeat("\t", level), typeOfAtom, position, atomSize)
-	if atoms[typeOfAtom] {
-		headerSize := int64(8)
-		copyBytes(sourceFile, destinationFile, position, headerSize)
-		parseAtoms(position+headerSize, atomSize -headerSize, level+1, sourceFile, destinationFile)
-	} else if typeOfAtom == "tkhd" {
-		atomBytes := make([]byte, atomSize)
-		sourceFile.ReadAt(atomBytes, position)
-
-		width := decodeDimensionFromBinary(atomBytes[84:87])
-		height := decodeDimensionFromBinary(atomBytes[88:91])
-
-		destinationFile.Write(atomBytes[0:84])
-		destinationFile.Write(encodeDimensionToBinary(height))
-		destinationFile.Write(encodeDimensionToBinary(width))
-		destinationFile.Write(atomBytes[92:])
-	} else {
-		copyBytes(sourceFile, destinationFile, position, atomSize)
-	}
-
-	return position + int64(atomSize)
-}
-
-func decodeDimensionFromBinary(bytes []byte) uint16 {
-	return binary.BigEndian.Uint16(bytes[:2])
-}
-
-func encodeDimensionToBinary(dimension uint16) []byte {
-	bytes := make([]byte, 4)
-	binary.BigEndian.PutUint16(bytes, dimension)
-	return bytes
-}
-
-
