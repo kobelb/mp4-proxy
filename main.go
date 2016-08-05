@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"os"
 )
 
 type ReplaceBody struct {
@@ -187,11 +188,20 @@ func main() {
 	dc.Start("http://localhost:5001")
 
 	s := &http.Server{
-		Addr:           ":5000",
+		Addr:           getAddr(),
 		Handler:        NewHttpHandler(dc),
 		MaxHeaderBytes: 1 << 20,
 	}
 	log.Fatal(s.ListenAndServe())
+}
+
+func getAddr () string {
+	s := os.Getenv("PORT")
+	if s == "" {
+		return ":5000"
+	}
+
+	return ":" + s
 }
 
 func check(e error) {
