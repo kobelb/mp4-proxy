@@ -18,4 +18,6 @@ There's also a `build.sh` that will statically build the app for Linux, which is
 #### Run
 `mp4-proxy` or `./mp4-proxy` depending on whether you installed the app after you built it. 
 
+Request the video using a URL like below `http://localhost:5000?url=https%3A%2F%2Faddpipevideos.s3.amazonaws.com%2F29d9277c9b566c0e2322ce4540f36f5d%2Fmvs285869022.mp4`
+
 By default the app listens for requests on port 5000, and it's using port 5001 for a [groupcache](https://github.com/golang/groupcache) that keeps all the dimensions for the videos cached. You can change the ports by setting the `PORT` and the `CACHE_PORT` environment variables.
