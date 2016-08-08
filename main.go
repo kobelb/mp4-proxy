@@ -31,6 +31,24 @@ type RewriteByte struct {
 	Byte     byte
 }
 
+func NewRewriteBytes (d Dimensions) *RewriteBytes {
+	rb := &RewriteBytes{
+		StartPosition: d.WidthPosition,
+		EndPosition:   d.HeightPosition + int64(len(d.Height)),
+		Elements:      make([]RewriteByte, len(d.Width)+len(d.Height)),
+	}
+
+	for i := range d.Width {
+		rb.Elements[i] = RewriteByte{Position: d.WidthPosition + int64(i), Byte: d.Height[i]}
+	}
+
+	for i := range d.Height {
+		rb.Elements[i + len(d.Width)] = RewriteByte{Position: d.HeightPosition + int64(i), Byte: d.Width[i]}
+	}
+
+	return rb;
+}
+
 func (rb *ReplaceBody) Read(p []byte) (n int, err error) {
 	n, err = rb.Body.Read(p)
 	start := rb.Position
@@ -73,19 +91,7 @@ func (t *ReplaceTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, err
 	}
 
-	rb := &RewriteBytes{
-		StartPosition: d.WidthPosition,
-		EndPosition:   d.HeightPosition + int64(len(d.Height)),
-		Elements:      make([]RewriteByte, len(d.Width)+len(d.Height)),
-	}
-
-	for i := range d.Width {
-		rb.Elements[i] = RewriteByte{Position: d.WidthPosition + int64(i), Byte: d.Height[i]}
-	}
-
-	for i := range d.Height {
-		rb.Elements[i + len(d.Width)] = RewriteByte{Position: d.HeightPosition + int64(i), Byte: d.Width[i]}
-	}
+	rb := NewRewriteBytes(d)
 
 	outres := new(http.Response)
 	*outres = *res // includes shallow copies of maps, but okay
