@@ -185,7 +185,7 @@ func (h *HttpHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 
 func main() {
 	dc := NewDimensionsCache()
-	dc.Start("http://localhost:5001")
+	dc.Start(getCacheUrl())
 
 	s := &http.Server{
 		Addr:           getAddr(),
@@ -193,6 +193,16 @@ func main() {
 		MaxHeaderBytes: 1 << 20,
 	}
 	log.Fatal(s.ListenAndServe())
+}
+
+func getCacheUrl () string {
+	b := "http://localhost"
+	s := os.Getenv("CACHE_PORT")
+	if s == "" {
+		return b + ":5001"
+	}
+
+	return b + ":" + s
 }
 
 func getAddr () string {
