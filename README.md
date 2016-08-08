@@ -16,4 +16,6 @@ This project has only been tested on Go 1.6 and assumes you have Go already inst
 There's also a `build.sh` that will statically build the app for Linux, which is currently used for the Docker image. 
  
 #### Run
-`mp4-proxy` or `./mp4-proxy` depending on whether you installed the app after you built it. By default the app listens for requests on port 5000, and it's using port 5001 for a [groupcache](https://github.com/golang/groupcache) that keeps all the dimensions for the videos cached. You can change the ports by setting the `PORT` and the `CACHE_PORT` environment variables.
+`mp4-proxy` or `./mp4-proxy` depending on whether you installed the app after you built it. 
+
+By default the app listens for requests on port 5000, and it's using port 5001 for a [groupcache](https://github.com/golang/groupcache) that keeps all the dimensions for the videos cached. You can change the ports by setting the `PORT` and the `CACHE_PORT` environment variables.
